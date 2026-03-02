@@ -64,9 +64,7 @@ fprintf("\nConditioned Sensor Outputs\n");
 fprintf("Time | Alt(m)  AltSt | VS(m/s)  VSSt | AS(m/s)  ASSt | Pitch(deg) PSt | Roll(deg) RSt | Temp(C)  TSt | Oil(kPa)  OSt\n");
 fprintf("------------------------------------------------------------------------------------------------------------------------\n");
 
-%% Helper to print state of each sensor
-stateCode = @(s) char( ...
-    (s=="OK")*"O" + (s=="SUSPECT")*"S" + (s=="FAILED")*"F" );
+stateCode = @(s) localStateCode(s);
 
 %% Main loop
 printEvery = round(0.2/dt);
@@ -115,3 +113,15 @@ for k = 1:length(t)
 end
 
 fprintf("\nSimulation complete.\n");
+
+function c = localStateCode(s)
+    if s == "OK"
+        c = 'O';
+    elseif s == "SUSPECT"
+        c = 'S';
+    elseif s == "FAILED"
+        c = 'F';
+    else
+        c = '?';
+    end
+end
