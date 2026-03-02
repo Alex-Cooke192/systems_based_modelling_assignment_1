@@ -57,24 +57,25 @@ classdef AirspeedSensorSITL < handle
             obj.dtWasExplicitlySet = true;
         end
 
-        function yOut = step(obj, trueAirspeed)
-            % step() takes the "true" airspeed and returns a noisy measurement.
-
-            obj.Raw = trueAirspeed;
-
-            y = trueAirspeed;
-
-            % Apply injector if present (adds noise / faults)
+        function [y, meta] = step(obj, xTrue)
+            % step() takes the "true" signal and returns a noisy/faulted measurement.
+        
+            % Store raw truth (optional but useful)
+            obj.Raw = xTrue;
+        
+            % Default meta
+            meta = struct("faultActive", false, "faultType", "NONE");
+        
+            % Start from truth
+            y = xTrue;
+        
+            % Apply injector once (noise + faults)
             if ~isempty(obj.Injector)
-                % Injector is responsible for "how" noise is applied.
-                % We ignore any extra metadata it returns.
-                y = obj.Injector.apply(y, obj.dt);
-                % If Injector.apply returns [y, inj], MATLAB will put the
-                % whole first output into y, which is what we want.
+                [y, meta] = obj.Injector.apply(y, obj.dt);   % obj.dt should be 1/obj.Fs
             end
-
+        
+            % Store output
             obj.Out = y;
-            yOut = y;
         end
     end
 end

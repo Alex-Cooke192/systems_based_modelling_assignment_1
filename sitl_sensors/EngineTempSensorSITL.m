@@ -57,22 +57,21 @@ classdef EngineTempSensorSITL < handle
             obj.dtWasExplicitlySet = true;
         end
 
-        function yOut = step(obj, trueTempDegC)
-            % step() takes the "true" engine temperature (degC) and returns a noisy measurement.
-
+        function [yOut, meta] = step(obj, trueTempDegC)
+            % step() takes the "true" engine temperature (degC) and returns a noisy/faulted measurement.
+        
             obj.Raw = trueTempDegC;
-
+        
             y = trueTempDegC;
-
+        
+            % Default meta (no injector / no fault)
+            meta = struct("faultActive", false, "faultType", "NONE");
+        
             % Apply injector if present (adds noise / faults)
             if ~isempty(obj.Injector)
-                % Injector is responsible for "how" noise is applied.
-                % We ignore any extra metadata it returns.
-                y = obj.Injector.apply(y, obj.dt);
-                % If Injector.apply returns [y, inj], MATLAB will put the
-                % whole first output into y, which is what we want.
+                [y, meta] = obj.Injector.apply(y, obj.dt);
             end
-
+        
             obj.Out = y;
             yOut = y;
         end

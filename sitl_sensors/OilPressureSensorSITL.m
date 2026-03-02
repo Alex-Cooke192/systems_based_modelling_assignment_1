@@ -57,22 +57,21 @@ classdef OilPressureSensorSITL < handle
             obj.dtWasExplicitlySet = true;
         end
 
-        function yOut = step(obj, truePkPa)
-            % step() takes the "true" oil pressure (kPa) and returns a noisy measurement.
-
+        function [yOut, meta] = step(obj, truePkPa)
+            % step() takes the "true" oil pressure (kPa) and returns a noisy/faulted measurement.
+        
             obj.Raw = truePkPa;
-
+        
             y = truePkPa;
-
+        
+            % Default meta (no injector / no fault active)
+            meta = struct("faultActive", false, "faultType", "NONE");
+        
             % Apply injector if present (adds noise / faults)
             if ~isempty(obj.Injector)
-                % Injector is responsible for "how" noise is applied.
-                % We ignore any extra metadata it returns.
-                y = obj.Injector.apply(y, obj.dt);
-                % If Injector.apply returns [y, inj], MATLAB will put the
-                % whole first output into y, which is what we want.
+                [y, meta] = obj.Injector.apply(y, obj.dt);
             end
-
+        
             obj.Out = y;
             yOut = y;
         end
