@@ -10,7 +10,7 @@ clear; clc;
 %% Simulation parameters
 Fs = 50;                 % master simulation rate
 dt = 1/Fs;
-Tsim = 20;                % seconds
+Tsim = 20;               % seconds
 t = 0:dt:Tsim;
 
 %% Randomness / repeatability mode
@@ -27,7 +27,6 @@ tempSensor  = EngineTempSensorSITL("Fs", Fs);
 oilSensor   = OilPressureSensorSITL("Fs", Fs);
 
 %% Attach injectors (separate injector per sensor for independent faulting)
-
 if MODE == "montecarlo"
     rng("shuffle");   % ensure randi() differs each run
 end
@@ -70,8 +69,8 @@ trueOil   = @(tt) 400 + 10*sin(0.3*tt);
 
 %% Header (conditioned outputs + state codes)
 fprintf("\nConditioned Sensor Outputs\n");
-fprintf("Time | Alt(m)  AltSt | VS(m/s)  VSSt | AS(m/s)  ASSt | Pitch(deg) PSt | Roll(deg) RSt | Temp(C)  TSt | Oil(kPa)  OSt\n");
-fprintf("------------------------------------------------------------------------------------------------------------------------\n");
+fprintf("Time | Alt(m)  AltSt AltFlt | VS(m/s)  VSSt VSFlt | AS(m/s)  ASSt ASFlt | Pitch(deg) PSt PFlt | Roll(deg) RSt RFlt | Temp(C)  TSt TFlt | Oil(kPa)  OSt OFlt\n");
+fprintf("-------------------------------------------------------------------------------------------------------------------------------------------------------------------------\n");
 
 stateCode = @(s) localStateCode(s);
 
@@ -90,14 +89,14 @@ for k = 1:length(t)
     tmpT = trueTemp(tt);
     oilT = trueOil(tt);
 
-    % Step sensors (raw measured outputs)
-    altMeas = altSensor.step(altT);
-    vsMeas  = vsSensor.step(vsT);
-    asMeas  = asSensor.step(asT);
-    pitMeas = pitchSensor.step(pitT);
-    rolMeas = rollSensor.step(rolT);
-    tmpMeas = tempSensor.step(tmpT);
-    oilMeas = oilSensor.step(oilT);
+    % Step sensors (raw measured outputs + injector meta)
+    [altMeas, altMeta] = altSensor.step(altT);
+    [vsMeas,  vsMeta ] = vsSensor.step(vsT);
+    [asMeas,  asMeta ] = asSensor.step(asT);
+    [pitMeas, pitMeta] = pitchSensor.step(pitT);
+    [rolMeas, rolMeta] = rollSensor.step(rolT);
+    [tmpMeas, tmpMeta] = tempSensor.step(tmpT);
+    [oilMeas, oilMeta] = oilSensor.step(oilT);
 
     % Run monitors (conditioning + health)
     [altC, altS] = altMon.step(altMeas);
@@ -108,16 +107,26 @@ for k = 1:length(t)
     [tmpC, tmpS] = tempMon.step(tmpMeas);
     [oilC, oilS] = oilMon.step(oilMeas);
 
+    % Decide what to print as "fault type" (only show when S/F)
+    altF = faultLabelIfSF(altS, altMeta);
+    vsF  = faultLabelIfSF(vsS,  vsMeta);
+    asF  = faultLabelIfSF(asS,  asMeta);
+    pitF = faultLabelIfSF(pitS, pitMeta);
+    rolF = faultLabelIfSF(rolS, rolMeta);
+    tmpF = faultLabelIfSF(tmpS, tmpMeta);
+    oilF = faultLabelIfSF(oilS, oilMeta);
+
     % Print
     if mod(k, printEvery) == 0
-        fprintf("%4.1f | %7.2f   %1s  | %7.2f   %1s  | %7.2f   %1s  | %9.2f   %1s  | %8.2f   %1s  | %7.2f   %1s  | %8.2f   %1s\n", ...
-            tt, altC, stateCode(altS), ...
-                vsC,  stateCode(vsS),  ...
-                asC,  stateCode(asS),  ...
-                pitC, stateCode(pitS), ...
-                rolC, stateCode(rolS), ...
-                tmpC, stateCode(tmpS), ...
-                oilC, stateCode(oilS));
+        fprintf("%4.1f | %7.2f   %1s   %-7s | %7.2f   %1s   %-7s | %7.2f   %1s   %-7s | %9.2f   %1s   %-7s | %8.2f   %1s   %-7s | %7.2f   %1s   %-7s | %8.2f   %1s   %-7s\n", ...
+            tt, ...
+            altC, stateCode(altS), altF, ...
+            vsC,  stateCode(vsS),  vsF,  ...
+            asC,  stateCode(asS),  asF,  ...
+            pitC, stateCode(pitS), pitF, ...
+            rolC, stateCode(rolS), rolF, ...
+            tmpC, stateCode(tmpS), tmpF, ...
+            oilC, stateCode(oilS), oilF);
     end
 end
 
@@ -147,5 +156,20 @@ function s = pickSeed(MODE, runId, sensorIndex)
             s = randi(1e9);                       % new each run
         otherwise
             error("Unknown MODE: %s", MODE);
+    end
+end
+
+function label = faultLabelIfSF(stateStr, meta)
+% Prints injector fault type only when the monitor says SUSPECT/FAILED.
+% Otherwise prints "-" to keep the table readable.
+    if stateStr == "SUSPECT" || stateStr == "FAILED"
+        if isstruct(meta) && isfield(meta,"faultActive") && isfield(meta,"faultType") && meta.faultActive
+            label = char(meta.faultType);
+        else
+            % SUSPECT/FAILED but injector says no fault active -> likely noise/thresholding
+            label = "NONE?";
+        end
+    else
+        label = "-";
     end
 end
