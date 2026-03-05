@@ -17,6 +17,11 @@ classdef SensorOrchestrator < handle
         T_fault (1,1) double = 0.7
         T_redundancyThreshold (1,1) double = 0.2
 
+        % Time Threshold for FAIL -> WARN / FAULT recovery gating
+        T_recover (1,1) double = 0.4
+        % Time threshold for WARN -> CLEAR
+        T_clear (1,1) double = 0.4
+
         mismatchThreshold (1,1) double = 0.1  % e.g. |altSlope - verticalSpeed|
         derivWindowSec (1,1) double = 0.5     % use altitude from ~0.5s ago
 
@@ -36,6 +41,27 @@ classdef SensorOrchestrator < handle
 
         % Latch to store if Log file has been made for this run
         LogEnabled = false
+
+        % Timers for transitions between states to add hysteresis
+        tWarnHold (1,1) double = 0
+        tFaultHold (1,1) double = 0
+        tClearHold (1,1) double = 0
+    end
+
+    properties (Access = private)
+
+        % init flag
+        hasFirstValid (1,1) logical = false
+
+        % timers
+        tSuspect (1,1) double = 0
+        tFailed  (1,1) double = 0
+        tClear   (1,1) double = 0
+        tRecover (1,1) double = 0
+        tRedMis  (1,1) double = 0
+        tRedSev  (1,1) double = 0
+    
+        state (1,1) string = "INIT"
     end
 
     methods
@@ -62,19 +88,24 @@ classdef SensorOrchestrator < handle
             obj.RedundancyMismatch = false;
             obj.RedundancyMismatchDuration = 0;
             obj.AltitudeHistory = [];
+
+            % keep private state machine consistent after reset
+            obj.state = "INIT";
+            obj.hasFirstValid = false;
+
+            % reset hysteresis timers
+            obj.tSuspect = 0; obj.tFailed = 0; obj.tClear = 0; obj.tRecover = 0;
+            obj.tRedMis = 0; obj.tRedSev = 0;
         end
 
         function [state, logMsg, diagnostics] = step(obj, states, values, tt)
-            % states: struct with fields (strings): AltitudeSensor, AirspeedSensor,
-            %         VerticalSpeedSensor, PitchSensor, RollSensor,
-            %         TemperatureSensor, PressureSensor
-            %
-            % values: struct with fields (doubles): Altitude, VerticalSpeed
-
             obj.PrevState = obj.State;
-            % Set default
-            nextState = obj.State; 
             logMsg = "";
+
+            % Keep external State in sync with internal state machine
+            if obj.state ~= obj.State
+                obj.state = obj.State;
+            end
 
             % 1) Update altitude history
             obj.pushAltitude(values.Altitude);
@@ -103,66 +134,117 @@ classdef SensorOrchestrator < handle
 
             allStates = [criticalStates, nonCriticalStates];
 
-            criticalFailNow    = any(criticalStates == "FAIL");
-            nonCriticalFailNow = any(nonCriticalStates == "FAIL");
+            % tolerate either "FAIL" or "FAILED" for robustness
+            isFail = (allStates == "FAIL") | (allStates == "FAILED");
+
+            criticalFailNow    = any((criticalStates == "FAIL") | (criticalStates == "FAILED"));
+            nonCriticalFailNow = any((nonCriticalStates == "FAIL") | (nonCriticalStates == "FAILED"));
+            anyFailNow         = any(isFail);
             anySuspectNow      = any(allStates == "SUSPECT");
 
+            % "all OK" means ALL are OK
+            allOK              = all(allStates == "OK");
+
+            % Redundancy "now" flags based on duration (kept for diagnostics)
             redundancyWarnNow  = obj.RedundancyMismatchDuration >= obj.T_redundancyThreshold;
             redundancyFaultNow = obj.RedundancyMismatchDuration >= obj.T_fault;
 
-            % 5) Decide next system state 
-            if obj.State == "FAULT"
-                % If no fails but at least one SUSPECT -> WARN
-                if ~criticalFailNow && ~nonCriticalFailNow && anySuspectNow
-                    nextState = "WARN";
-
-                % If no fails and all SensorHealth == OK -> NORMAL
-                elseif ~criticalFailNow && ~nonCriticalFailNow && ~anySuspectNow
-                    nextState = "NORMAL"; 
-
-                else 
-                    % No change
-                    nextState = "FAULT"; 
-                end
-                
-            elseif obj.State == "WARN"
-                % If all SENSORHEALTH = OK and RedundancyMismatch -> NORMAL
-                if ~criticalFailNow && ~nonCriticalFailNow && ~anySuspectNow
-                    if ~redundancyFaultNow && ~redundancyWarnNow
-                        nextState = "NORMAL"; 
-                    end  
-
-                % If any safety-critical sensorHelath == FAILED or
-                % ReundancyMismatchDuration > T_redundancThreshold -> FAULT
-                elseif criticalFailNow || redundancyFaultNow
-                    nextState = "FAULT";
-                else
-                    % No change
-                    nextState = "WARN"; 
-                end 
-
-          
-            else 
-                if criticalFailNow || redundancyFaultNow
-                    nextState = "FAULT";
-                elseif anySuspectNow || nonCriticalFailNow || redundancyWarnNow
-                    nextState = "WARN";
-                else
-                    nextState = "NORMAL";
-                end
+            % Hysteresis accumulators
+            if anySuspectNow && ~anyFailNow
+                obj.tSuspect = obj.tSuspect + obj.dt;
+            else
+                obj.tSuspect = 0;
             end
 
-            obj.State = nextState;
-
-            % 6) Logging (only when state changes)
-            if obj.State ~= obj.PrevState
-                prevState = obj.PrevState; 
-                time = string(datetime("now"), "dd:MM:yyyy HH:mm:ss.SSS"); 
-                newState = obj.State; 
-                obj.logger.logStateChange(prevState, time, tt, newState)
+            if anyFailNow
+                obj.tFailed = obj.tFailed + obj.dt;
+            else
+                obj.tFailed = 0;
             end
 
-            % 7) Diagnostics output
+            % Redundancy timers: integrate the raw mismatch condition
+            if obj.RedundancyMismatch
+                obj.tRedMis = obj.tRedMis + obj.dt;
+                obj.tRedSev = obj.tRedSev + obj.dt;  % no separate severity yet
+            else
+                obj.tRedMis = 0;
+                obj.tRedSev = 0;
+            end
+
+            % CHANGED: split "clear" vs "recover" so FAULT doesn't flicker
+            % between on/off
+            % Clear (for WARN->NORMAL): truly clean system
+            clearCond = allOK && ~obj.RedundancyMismatch;
+
+            if clearCond
+                obj.tClear = obj.tClear + obj.dt;
+            else
+                obj.tClear = 0;
+            end
+
+            % Recover (for FAULT exit): failures are gone and redundancy mismatch gone.
+            % (does NOT require all sensors OK; allows landing in WARN if SUSPECT remains)
+            recoverCond = (~anyFailNow) && (~obj.RedundancyMismatch);
+
+            if recoverCond
+                obj.tRecover = obj.tRecover + obj.dt;
+            else
+                obj.tRecover = 0;
+            end
+
+            % Convert redundancy timers to debounced warn/fault thresholds
+            redWarnHold  = obj.tRedMis >= obj.T_warn;
+            redFaultHold = obj.tRedSev >= obj.T_fault;
+
+            switch obj.state
+                case "INIT"
+                    obj.hasFirstValid = true;
+                    if obj.hasFirstValid
+                        obj.state = "NORMAL";
+                        obj.tSuspect = 0; obj.tFailed = 0; obj.tRedMis = 0; obj.tRedSev = 0;
+                        obj.tClear = 0; obj.tRecover = 0;
+                    end
+
+                case "NORMAL"
+                    if obj.tFailed >= obj.T_fault || redFaultHold
+                        obj.state = "FAULT";
+                    elseif obj.tSuspect >= obj.T_warn || redWarnHold
+                        obj.state = "WARN";
+                    end
+
+                case "WARN"
+                    if obj.tFailed >= obj.T_fault || redFaultHold
+                        obj.state = "FAULT";
+                    elseif obj.tClear >= obj.T_clear
+                        obj.state = "NORMAL";
+                    end
+
+                case "FAULT"
+                    % CHANGED: latch FAULT until recoverCond holds for T_recover
+                    if obj.tRecover >= obj.T_recover
+                        % after recovery time is met, decide where to go
+                        % next based on other sensors states
+                        if anySuspectNow || redWarnHold
+                            obj.state = "WARN";
+                        else
+                            obj.state = "NORMAL";
+                        end
+                    end
+                    % ------------------------------------------------------------------
+            end
+
+            % publish internal state machine state outward
+            obj.State = obj.state;
+
+            % Logging (only when state changes)
+            if obj.State ~= obj.PrevState && ~isempty(obj.logger)
+                prevState = obj.PrevState;
+                time = string(datetime("now"), "dd:MM:yyyy HH:mm:ss.SSS");
+                newState = obj.State;
+                obj.logger.logStateChange(prevState, time, tt, newState);
+            end
+
+            % Diagnostics output
             diagnostics = struct();
             diagnostics.criticalFailNow = criticalFailNow;
             diagnostics.nonCriticalFailNow = nonCriticalFailNow;
@@ -178,7 +260,6 @@ classdef SensorOrchestrator < handle
 
     methods (Access = private)
         function pushAltitude(obj, altitude)
-            % Keep enough samples to cover derivWindowSec
             nKeep = max(2, ceil(obj.derivWindowSec / obj.dt) + 1);
 
             obj.AltitudeHistory(end+1,1) = altitude;
@@ -189,7 +270,6 @@ classdef SensorOrchestrator < handle
         end
 
         function mismatch = computeRedundancyMismatch(obj, values)
-            % If not enough history, can't compute slope reliably yet
             nBack = round(obj.derivWindowSec / obj.dt);
             if numel(obj.AltitudeHistory) <= nBack
                 mismatch = false;
@@ -199,7 +279,7 @@ classdef SensorOrchestrator < handle
             altNow = obj.AltitudeHistory(end);
             altPast = obj.AltitudeHistory(end - nBack);
 
-            altSlope = (altNow - altPast) / (nBack * obj.dt); % units of altitude per second
+            altSlope = (altNow - altPast) / (nBack * obj.dt);
             vs = values.VerticalSpeed;
 
             mismatch = abs(altSlope - vs) > obj.mismatchThreshold;
