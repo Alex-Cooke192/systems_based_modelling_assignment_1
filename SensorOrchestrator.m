@@ -12,11 +12,11 @@
 classdef SensorOrchestrator < handle
     properties
         Fs (1,1) double = 20
-        dt (1,1) double = 0.05
+        dt (1,1) double = 0.1
 
         T_warn (1,1) double = 0.5
-        T_fault (1,1) double = 0.7
-        T_redundancyThreshold (1,1) double = 0.1
+        T_fault (1,1) double = 1.0
+        T_redundancyThreshold (1,1) double = 0.3
 
         % Cooloff period after state transition
         T_cooldown (1,1) double = 0.5 
@@ -26,8 +26,8 @@ classdef SensorOrchestrator < handle
         % Time threshold for WARN -> CLEAR
         T_clear (1,1) double = 0.4
 
-        mismatchThreshold (1,1) double = 0.1  % e.g. |altSlope - verticalSpeed|
-        derivWindowSec (1,1) double = 1.0     % use altitude from ~X seconds ago
+        mismatchThreshold (1,1) double = 2.0  % e.g. |altSlope - verticalSpeed|
+        derivWindowSec (1,1) double = 0.5     % use altitude from ~X seconds ago
 
         logger = []
     end
@@ -154,13 +154,24 @@ classdef SensorOrchestrator < handle
             % State transitions can only occur after fixed cooldowns (no
             % hysteresis implemented to account for noise/fluctuation
             % THIS IS A CONSTRAINT
+
+            % Clear condition: everything healthy and no redundancy mismatch
+            clearCond = allOK && ~obj.RedundancyMismatch;
             
-            if obj.RedundancyMismatch
-                obj.tRedMis = obj.tRedMis + obj.dt; 
-                obj.tRedSev = obj.tRedSev + obj.dt; 
+            if clearCond
+                obj.tClear = obj.tClear + obj.dt;
             else
-                obj.tRedMis = 0;
-                obj.tRedSev = 0;
+                obj.tClear = 0;
+            end
+            
+            % Recover condition for leaving FAULT:
+            % no FAILs and no redundancy mismatch
+            recoverCond = (~anyFailNow) && (~obj.RedundancyMismatch);
+            
+            if recoverCond
+                obj.tRecover = obj.tRecover + obj.dt;
+            else
+                obj.tRecover = 0;
             end
 
                 % State machine for state transitions
@@ -169,60 +180,25 @@ classdef SensorOrchestrator < handle
                     % If in normal, check if FAULT has been present for >
                     % T_recover
                     case "FAULT"
-                        if obj.cooldownPeriod >= obj.T_recover
-                            % We can move
-
-                            % Check transition to warn
-                            if ~anyFailNow && anySuspectNow && ~redundancyFaultNow
-                                % Reset timer ahead of next transition
-                                obj.cooldownPeriod = 0; 
-
-                                obj.state = "WARN"; 
-    
-                            % Check transition to normal
-                            elseif allOK && ~redundancyFaultNow && ~redundancyWarnNow
-                                % Reset timer ahead of next transition
-                                obj.cooldownPeriod = 0; 
-
+                        % Stay in FAULT unless recovery has been continuously true long enough
+                        if obj.tRecover >= obj.T_recover
+                    
+                            if ~anyFailNow && anySuspectNow && ~obj.RedundancyMismatch
+                                obj.state = "WARN";
+                    
+                            elseif allOK && ~obj.RedundancyMismatch
                                 obj.state = "NORMAL";
-
-                            end 
-
-                            % Reset timer for next attempt
-                            obj.cooldownPeriod = 0; 
-
-                        else
-                            % Add to timer
-                            obj.cooldownPeriod = obj.cooldownPeriod + obj.dt; 
-                        end 
+                            end
+                        end
 
                     case "WARN"
-                        % Check if we have been longer than T_clear
-                        if obj.cooldownPeriod >= obj.T_clear
-                            % We can move
-
-                            % Check transition to Fault
-                            if criticalFailNow || redundancyFaultNow
-                                % Reset timer ahead of next transition
-                                obj.cooldownPeriod = 0; 
-
-                                obj.state = "FAULT"; 
-    
-                            % Check transition to normal
-                            elseif allOK && ~redundancyFaultNow && ~redundancyWarnNow
-                                % Reset timer ahead of next transition
-                                obj.cooldownPeriod = 0; 
-
-                                obj.state = "NORMAL"; 
-   
-                            end
-
-                            % Reset timer for next attmpt
-                            obj.cooldownPeriod = 0; 
-
-                        else 
-                            % If not, add to timer 
-                            obj.cooldownPeriod = obj.cooldownPeriod + obj.dt; 
+                        % Escalate immediately if fault condition persists
+                        if criticalFailNow || redundancyFaultNow
+                            obj.state = "FAULT";
+                    
+                        % Only clear to NORMAL if things have been healthy long enough
+                        elseif obj.tClear >= obj.T_clear
+                            obj.state = "NORMAL";
                         end
 
                     case "NORMAL"
@@ -240,13 +216,23 @@ classdef SensorOrchestrator < handle
             % publish internal state machine state outward
             obj.State = obj.state;
 
-            % Logging (only when state changes)
+            tensSeconds = round(tt, 1); 
+
+            logTimeFlag = mod(round(tt*10), 2) == 0;
+            % Logging (only when state changes or when time = .0, .2, .4, .6, .8)
             if obj.State ~= obj.PrevState && ~isempty(obj.logger)
                 prevState = obj.PrevState;
                 time = string(datetime("now"), "dd:MM:yyyy HH:mm:ss.SSS");
                 newState = obj.State;
                 obj.logger.logStateChange(prevState, time, tt, newState);
+            elseif logTimeFlag == true
+                prevState = obj.PrevState;
+                time = string(datetime("now"), "dd:MM:yyyy HH:mm:ss.SSS");
+                obj.logger.logTime(prevState, time, tt);
+                % Log time
             end
+
+           
 
             % Diagnostics output
             diagnostics = struct();
@@ -285,13 +271,13 @@ classdef SensorOrchestrator < handle
             
             % If altNow is not a number, cannot determine mismatch so just
             % assume false
-            if isa(altNow, "double")
+            if isnan(altNow)
                 mismatch = false;
                 return
             end 
 
             % If altPast is not num, mismatch false
-            if isa(altPast, "double")
+            if isnan(altPast)
                 mismatch = false; 
                 return 
             end
