@@ -27,7 +27,7 @@ classdef DeterministicInjector < handle
     end
 
     methods
-        function obj = ScriptedInjector(varargin)
+        function obj = DeterministicInjector(varargin)
             for k = 1:2:numel(varargin)
                 obj.(varargin{k}) = varargin{k+1};
             end
