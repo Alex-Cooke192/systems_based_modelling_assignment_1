@@ -169,13 +169,16 @@ for k = 1:length(t)
     fprintf("Simulation time %.2f \n", tt)
     fprintf("System: %s (%c)  Cause: %s\n", sysStateStr, sysS, sysF);
     
-        fprintf("Current State: %s \n", state)
-        fprintf("Log Message: %s \n", logMsg)
-        disp(diagnostics)
-        % Print all sensors & sensor states
-        fprintf("Alt Sensor | Airspeed Sensor | Vertical Speed Sensor | Roll Sensor | Pitch Sensor | Engine Temp Sensor | Oil Pressure Sensor\n")
-        fprintf("%.1f  %s   |%.1f      %s     |%.1f         %s        |%.1f    %s   |%.1f    %s    |%.1f       %s       |%.1f        %s      \n",altT, altF,asT,asF,vsT,vsF,pitT,pitF,rolT,rolF,tmpT,tmpF,oilT,oilF)
-    end 
+    fprintf("Current State: %s \n", state)
+    fprintf("Log Message: %s \n", logMsg)
+    disp(diagnostics)
+    % Print all sensors & sensor states
+    fprintf(" Altitude        Airspeed        Vert Speed      Roll           Pitch          Engine Temp     Oil Pressure\n")
+    fprintf(" -----------------------------------------------------------------------------------------------\n")
+
+    fprintf(" %6.1f (%s)      %6.1f (%s)      %6.1f (%s)      %6.1f (%s)      %6.1f (%s)      %6.1f (%s)      %6.1f (%s)\n", ...
+    altT,altF, asT,asF, vsT,vsF, rolT,rolF, pitT,pitF, tmpT,tmpF, oilT,oilF);
+end
 
 fprintf("\nSimulation complete.\n");
 

@@ -16,7 +16,7 @@ classdef SensorOrchestrator < handle
 
         T_warn (1,1) double = 0.5
         T_fault (1,1) double = 0.7
-        T_redundancyThreshold (1,1) double = 0.2
+        T_redundancyThreshold (1,1) double = 0.1
 
         % Cooloff period after state transition
         T_cooldown (1,1) double = 0.5 
@@ -27,7 +27,7 @@ classdef SensorOrchestrator < handle
         T_clear (1,1) double = 0.4
 
         mismatchThreshold (1,1) double = 0.1  % e.g. |altSlope - verticalSpeed|
-        derivWindowSec (1,1) double = 0.5     % use altitude from ~0.5s ago
+        derivWindowSec (1,1) double = 1.0     % use altitude from ~X seconds ago
 
         logger = []
     end
@@ -157,7 +157,7 @@ classdef SensorOrchestrator < handle
             
             if obj.RedundancyMismatch
                 obj.tRedMis = obj.tRedMis + obj.dt; 
-                obj.tRedSev = obj.tRedMis + obj.dt; 
+                obj.tRedSev = obj.tRedSev + obj.dt; 
             else
                 obj.tRedMis = 0;
                 obj.tRedSev = 0;
@@ -169,57 +169,74 @@ classdef SensorOrchestrator < handle
                     % If in normal, check if FAULT has been present for >
                     % T_recover
                     case "FAULT"
-                        if obj.tRecover >= obj.T_recover
+                        if obj.cooldownPeriod >= obj.T_recover
                             % We can move
 
                             % Check transition to warn
-                            if ~anyFailNow && anySuspectNow
+                            if ~anyFailNow && anySuspectNow && ~redundancyFaultNow
+                                % Reset timer ahead of next transition
+                                obj.cooldownPeriod = 0; 
+
                                 obj.state = "WARN"; 
     
                             % Check transition to normal
-                            elseif ~anyFailNow && ~anySuspectNow
+                            elseif allOK && ~redundancyFaultNow && ~redundancyWarnNow
+                                % Reset timer ahead of next transition
+                                obj.cooldownPeriod = 0; 
+
                                 obj.state = "NORMAL";
 
                             end 
 
+                            % Reset timer for next attempt
+                            obj.cooldownPeriod = 0; 
+
                         else
                             % Add to timer
-                            obj.tRecover = obj.tRecover + obj.dt; 
+                            obj.cooldownPeriod = obj.cooldownPeriod + obj.dt; 
                         end 
 
                     case "WARN"
                         % Check if we have been longer than T_clear
-                        if obj.tClear >= obj.T_clear
+                        if obj.cooldownPeriod >= obj.T_clear
                             % We can move
 
                             % Check transition to Fault
-                            if anyFailNow | obj.tRedSev >= obj.T_fault
-                                obj.state = "FAULT"
+                            if criticalFailNow || redundancyFaultNow
+                                % Reset timer ahead of next transition
+                                obj.cooldownPeriod = 0; 
+
+                                obj.state = "FAULT"; 
     
                             % Check transition to normal
                             elseif allOK && ~redundancyFaultNow && ~redundancyWarnNow
+                                % Reset timer ahead of next transition
+                                obj.cooldownPeriod = 0; 
+
                                 obj.state = "NORMAL"; 
-    
+   
                             end
+
+                            % Reset timer for next attmpt
+                            obj.cooldownPeriod = 0; 
+
                         else 
                             % If not, add to timer 
-                            obj.tClear = obj.T_clear + obj.dt; 
+                            obj.cooldownPeriod = obj.cooldownPeriod + obj.dt; 
                         end
 
                     case "NORMAL"
                          % Check transition to fault
-                        if anyFailNow | obj.tRedSev >= obj.T_fault 
+                        if criticalFailNow || redundancyFaultNow 
                             obj.state = "FAULT"; 
 
                         % Check transition to warn
-                        elseif ~anyFailNow && anySuspectNow | obj.tRedMis > obj.T_warn
+                        elseif (~criticalFailNow && anySuspectNow) || redundancyWarnNow
                             obj.state = "WARN"; 
 
                         end
                 end 
                
-
-
             % publish internal state machine state outward
             obj.State = obj.state;
 
@@ -261,10 +278,23 @@ classdef SensorOrchestrator < handle
             if numel(obj.AltitudeHistory) <= nBack
                 mismatch = false;
                 return;
-            end
+            end 
 
             altNow = obj.AltitudeHistory(end);
             altPast = obj.AltitudeHistory(end - nBack);
+            
+            % If altNow is not a number, cannot determine mismatch so just
+            % assume false
+            if isa(altNow, "double")
+                mismatch = false;
+                return
+            end 
+
+            % If altPast is not num, mismatch false
+            if isa(altPast, "double")
+                mismatch = false; 
+                return 
+            end
 
             altSlope = (altNow - altPast) / (nBack * obj.dt);
             vs = values.VerticalSpeed;
