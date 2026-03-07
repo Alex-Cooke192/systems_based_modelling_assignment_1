@@ -13,7 +13,7 @@ classdef SimpleInjector < handle
         % Always-on measurement noise (optional)
         NoiseSigma (1,1) double = 0.0
 
-        % Fault start rate (approx) [1/s]
+        % Fault start rate (approx) [1/s] (set to 0 if faults disabled)
         FaultRatePerSecond (1,1) double = 0.0
 
         % How long a fault lasts once started - randomised duration between
