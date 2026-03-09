@@ -11,17 +11,25 @@ Tsim = 20;
 t = 0:dt:Tsim;
 
 % Number of runs where warn/fault occurs during at least one timestep
+% (MCV-1)
 warnOccured = zeros(N, 1); 
 faultOccured = zeros(N, 1);
 
 warnEvents = 0;
 faultEvents = 0;
 
-warnPresent = zeros(1, length(t)); 
 warnTimesteps = zeros(N, length(t)); 
+
+% Run-level detection results for MCV-2
+detectedRuns      = zeros(N,1);
+detectionDelayRuns = nan(N,1);
+faultTypeRuns     = strings(N,1);
+faultedSensorRuns = strings(N,1);
+faultStartRuns    = nan(N,1);
 
 %% Instantiate sensors
 for run = 1:N
+    warnPresent = zeros(1, length(t)); 
 
     altSensor   = AltitudeSensorSITL("Fs", Fs);
     vsSensor    = VerticalSpeedSensorSITL("Fs", Fs);
@@ -99,52 +107,75 @@ for run = 1:N
                 ); 
 
         case "MCV-2"
+            % Choose one fault type per run
             failureClasses = ["BIAS", "DRIFT", "STUCK", "DROPOUT"];
             idx = randi(length(failureClasses));
             FaultType = failureClasses(idx);
-            
+        
+            % Choose one target sensor per run
+            sensorNames = ["ALT","VS","AS","PIT","ROL","TMP","OIL"];
+            sensorIdx = randi(length(sensorNames));
+            targetSensor = sensorNames(sensorIdx);
+        
+            % Store for later analysis
+            faultTypeRuns(run) = FaultType;
+            faultedSensorRuns(run) = targetSensor;
+        
+            % Random fault start time
+            faultStart = 5.0 + 5.0*rand();
+            faultStartRuns(run) = faultStart;
+        
             commonArgs = { ...
                 "NoiseSigma", 0.3, ...
                 "Enabled", true, ...
                 "FaultType", FaultType, ...
-                "FaultStartTime", 5.0, ...
-                "FaultDuration", 0.8 ...
+                "FaultStartTime", faultStart, ...
+                "FaultDuration", 2.0 ...
             };
-            
+        
             specificArgs = {};
-            
+        
             switch FaultType
                 case "BIAS"
-                    specificArgs = { ...
-                        "BiasMagnitude", 1 + 4*rand() ...
-                    };
-            
+                    specificArgs = {"BiasMagnitude", 6 + 4*rand()};
                 case "DRIFT"
-                    specificArgs = { ...
-                        "DriftRateMagnitude", 0.5 + 2*rand() ...
-                    };
-            
-                case "SPIKE"
-                    specificArgs = { ...
-                        "SpikeMagnitude", 5 + 15*rand() ...
-                    };
-            
+                    specificArgs = {"DriftRateMagnitude", 8 + 2*rand()};
                 case "DROPOUT"
-                    specificArgs = { ...
-                        "DropoutAsNaN", true ...
-                    };
-            
+                    specificArgs = {"DropoutAsNaN", true};
                 case "STUCK"
                     specificArgs = {};
             end
-
-            altSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
-            vsSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
-            asSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:}); 
-            pitchSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
-            rollSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
-            tempSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
-            oilSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
+        
+            % Give all sensors nominal noise-only injectors first
+            altSensor.Injector   = DeterministicInjector("NoiseSigma", 0.3);
+            vsSensor.Injector    = DeterministicInjector("NoiseSigma", 0.1);
+            asSensor.Injector    = DeterministicInjector("NoiseSigma", 0.1);
+            pitchSensor.Injector = DeterministicInjector("NoiseSigma", 0.3);
+            rollSensor.Injector  = DeterministicInjector("NoiseSigma", 0.3);
+            tempSensor.Injector  = DeterministicInjector("NoiseSigma", 0.5);
+            oilSensor.Injector   = DeterministicInjector("NoiseSigma", 0.2);
+        
+            % Apply the fault only to the selected sensor
+            switch targetSensor
+                case "ALT"
+                    altSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
+                case "VS"
+                    vsSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
+                case "AS"
+                    asSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
+                case "PIT"
+                    pitchSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
+                case "ROL"
+                    rollSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
+                case "TMP"
+                    tempSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
+                case "OIL"
+                    oilSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
+            end
+        
+            % Detection tracking for this run
+            detectedThisRun = false;
+            detectionTime = NaN;
 
         case "MCV-3"
             altSensor.Injector = DeterministicInjector(...
@@ -283,6 +314,31 @@ for run = 1:N
     
         altC_hist(k) = altC;
         vsC_hist(k)  = vsC;
+
+        if scenarioId == "MCV-2"
+            switch targetSensor
+                case "ALT"
+                    targetState = altS;
+                case "VS"
+                    targetState = vsS;
+                case "AS"
+                    targetState = asS;
+                case "PIT"
+                    targetState = pitS;
+                case "ROL"
+                    targetState = rolS;
+                case "TMP"
+                    targetState = tmpS;
+                case "OIL"
+                    targetState = oilS;
+            end
+
+            % First detection = first entry into SUSPECT or FAILED after fault starts
+            if ~detectedThisRun && tt >= faultStart && (targetState == "SUSPECT" || targetState == "FAILED")
+                detectedThisRun = true;
+                detectionTime = tt;
+            end
+        end
     
         states = struct( ...
             "AltitudeSensor", altS, ...
@@ -324,13 +380,11 @@ for run = 1:N
         % Detect entry into WARN
         if sysStateNum(i) == 1 && sysStateNum(i-1) ~= 1
             warnEvents = warnEvents + 1;
-            detectionTime = k; 
         end
     
         % Detect entry into FAULT
         if sysStateNum(i) == 2 && sysStateNum(i-1) ~= 2
             faultEvents = faultEvents + 1;
-            detectionTime = k; 
         end
     end
 
@@ -343,7 +397,7 @@ for run = 1:N
         faultOccured(run) = 1;  
     end 
 
-    warnTimesteps = [warnTimesteps; warnPresent]; 
+    warnTimesteps(run, :) = warnPresent; 
 
     %% Calculate the rate of change of the altitude
     altSlope_hist = nan(length(t),1);
@@ -351,6 +405,13 @@ for run = 1:N
     for k = 2:length(t)
         if ~isnan(altC_hist(k)) && ~isnan(altC_hist(k-1))
             altSlope_hist(k) = (altC_hist(k) - altC_hist(k-1)) / dt;
+        end
+    end
+
+    if scenarioId == "MCV-2"
+        if detectedThisRun
+            detectedRuns(run) = 1;
+            detectionDelayRuns(run) = detectionTime - faultStart;
         end
     end
 end
@@ -399,6 +460,23 @@ if scenarioId == "MCV-1"
     grid on
 
 end 
+
+if scenarioId == "MCV-2"
+    detectionProbability = mean(detectedRuns) * 100;
+    missedDetectionProbability = (1 - mean(detectedRuns)) * 100;
+
+    validDelays = detectionDelayRuns(~isnan(detectionDelayRuns));
+    meanDetectionDelay = mean(validDelays);
+    maxDetectionDelay = max(validDelays);
+
+    fprintf("\nMCV-2 Detection Results:\n");
+    fprintf("Detection probability: %.2f %%\n", detectionProbability);
+    fprintf("Missed-detection probability: %.2f %%\n", missedDetectionProbability);
+    fprintf("Mean detection delay: %.3f s\n", meanDetectionDelay);
+    fprintf("Max detection delay: %.3f s\n", maxDetectionDelay);
+
+    % Figure for MCV-2?
+end
 
 disp("Scenario complete.");
 
