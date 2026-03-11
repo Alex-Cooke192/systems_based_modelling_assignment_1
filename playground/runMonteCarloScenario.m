@@ -1,36 +1,59 @@
 %% runBehaviouralScenario.m
 clear; clc;
 
-scenarioId = "MCV-2";   % choose: MCV-1, MCV-2, MCV-3, (MCV-4?)
+scenarioId = "MCV-2";   % choose: MCV-1, MCV-2, MCV-3
 
 %% Simulation parameters
-N = 1000;       % Number of trials
-Fs = 10;
+N = 1000;                 % Number of trials
+Fs = 100;
 dt = 1/Fs;
 Tsim = 20;
 t = 0:dt:Tsim;
 
-% Number of runs where warn/fault occurs during at least one timestep
-% (MCV-1)
-warnOccured = zeros(N, 1); 
-faultOccured = zeros(N, 1);
+%% Requirement thresholds
+req = struct();
+
+% Per-run storage
+warnTimestepsPerRun  = zeros(N,1);
+faultTimestepsPerRun = zeros(N,1);
+warnEntriesPerRun    = zeros(N,1);
+faultEntriesPerRun   = zeros(N,1);
+
+% MCV-1 robustness requirements
+req.MCV1.maxWarnTimestepsPerRun  = 0;
+req.MCV1.maxFaultTimestepsPerRun = 0;
+req.MCV1.maxWarnEntriesPerRun    = 0;
+req.MCV1.maxFaultEntriesPerRun   = 0;
+
+% MCV-2 fault-detection requirements
+req.MCV2.maxDetectionDelay = 0.01;        % seconds
+req.MCV2.minDetectionProbability = 95;   % percent
+
+% Run-level outcome storage
+warnOccured = zeros(N,1);
+faultOccured = zeros(N,1);
 
 warnEvents = 0;
 faultEvents = 0;
 
-warnTimesteps = zeros(N, length(t)); 
+warnTimesteps = zeros(N, length(t));
 
 % Run-level detection results for MCV-2
-detectedRuns      = zeros(N,1);
+detectedRuns       = zeros(N,1);
 detectionDelayRuns = nan(N,1);
-faultTypeRuns     = strings(N,1);
-faultedSensorRuns = strings(N,1);
-faultStartRuns    = nan(N,1);
+faultTypeRuns      = strings(N,1);
+faultedSensorRuns  = strings(N,1);
+faultStartRuns     = nan(N,1);
 
-%% Instantiate sensors
+%% Monte Carlo loop
 for run = 1:N
-    warnPresent = zeros(1, length(t)); 
+    warnPresent = zeros(1, length(t));
+    faultPresent = zeros(1, length(t));
 
+    thisRunWarnEntries = 0;
+    thisRunFaultEntries = 0;
+
+    %% Instantiate sensors
     altSensor   = AltitudeSensorSITL("Fs", Fs);
     vsSensor    = VerticalSpeedSensorSITL("Fs", Fs);
     asSensor    = AirspeedSensorSITL("Fs", Fs);
@@ -38,8 +61,8 @@ for run = 1:N
     rollSensor  = RollSensorSITL("Fs", Fs);
     tempSensor  = EngineTempSensorSITL("Fs", Fs);
     oilSensor   = OilPressureSensorSITL("Fs", Fs);
-    
-    %% Default: no faults
+
+    %% Default injectors
     switch scenarioId
         case "MCV-1"
             altSensor.Injector   = SimpleInjector();
@@ -60,71 +83,39 @@ for run = 1:N
             oilSensor.Injector   = DeterministicInjector();
 
         case "MCV-3"
-            % Do some stuff
+            % placeholder
     end
 
-    %% Model for noise
-    NoiseMu = 0; 
-    NoiseSigma = NaN; % empty for now - decided by scenario 
-    
-    %% Apply scenario-specific noise
+    %% Apply scenario-specific configuration
     switch scenarioId
         case "MCV-1"
-            NoiseSigma = 0.3; 
-            altSensor.Injector = SimpleInjector(...
-                "NoiseSigma", 0.3,...
-                "FaultRatePerSecond", 0.0...
-                ); 
-
-            vsSensor.Injector = SimpleInjector(...
-                "NoiseSigma", 0.1,...
-                "FaultRatePerSecond", 0.0...
-                ); 
-
-            asSensor.Injector = SimpleInjector(...
-                "NoiseSigma", 0.1,...
-                "FaultRatePerSecond", 0.0...
-                ); 
-
-            pitchSensor.Injector = SimpleInjector(...
-                "NoiseSigma", 0.3,...
-                "FaultRatePerSecond", 0.0...
-                ); 
-
-            rollSensor.Injector = SimpleInjector(...
-                "NoiseSigma", 0.3,...
-                "FaultRatePerSecond", 0.0...
-                ); 
-
-            tempSensor.Injector = SimpleInjector(...
-                "NoiseSigma", 0.5,...
-                "FaultRatePerSecond", 0.0...
-                ); 
-
-            oilSensor.Injector = SimpleInjector(...
-                "NoiseSigma", 0.2,...
-                "FaultRatePerSecond", 0.0...
-                ); 
+            altSensor.Injector = SimpleInjector("NoiseSigma", 0.3, "FaultRatePerSecond", 0.0);
+            vsSensor.Injector = SimpleInjector("NoiseSigma", 0.1, "FaultRatePerSecond", 0.0);
+            asSensor.Injector = SimpleInjector("NoiseSigma", 0.1, "FaultRatePerSecond", 0.0);
+            pitchSensor.Injector = SimpleInjector("NoiseSigma", 0.3, "FaultRatePerSecond", 0.0);
+            rollSensor.Injector = SimpleInjector("NoiseSigma", 0.3, "FaultRatePerSecond", 0.0);
+            tempSensor.Injector = SimpleInjector("NoiseSigma", 0.5, "FaultRatePerSecond", 0.0);
+            oilSensor.Injector = SimpleInjector("NoiseSigma", 0.2, "FaultRatePerSecond", 0.0);
 
         case "MCV-2"
             % Choose one fault type per run
             failureClasses = ["BIAS", "DRIFT", "STUCK", "DROPOUT"];
             idx = randi(length(failureClasses));
             FaultType = failureClasses(idx);
-        
+
             % Choose one target sensor per run
             sensorNames = ["ALT","VS","AS","PIT","ROL","TMP","OIL"];
             sensorIdx = randi(length(sensorNames));
             targetSensor = sensorNames(sensorIdx);
-        
+
             % Store for later analysis
             faultTypeRuns(run) = FaultType;
             faultedSensorRuns(run) = targetSensor;
-        
+
             % Random fault start time
             faultStart = 5.0 + 5.0*rand();
             faultStartRuns(run) = faultStart;
-        
+
             commonArgs = { ...
                 "NoiseSigma", 0.3, ...
                 "Enabled", true, ...
@@ -132,9 +123,8 @@ for run = 1:N
                 "FaultStartTime", faultStart, ...
                 "FaultDuration", 2.0 ...
             };
-        
+
             specificArgs = {};
-        
             switch FaultType
                 case "BIAS"
                     specificArgs = {"BiasMagnitude", 1 + 4*rand()};
@@ -145,8 +135,8 @@ for run = 1:N
                 case "STUCK"
                     specificArgs = {};
             end
-        
-            % Give all sensors nominal noise-only injectors first
+
+            % Nominal injectors first
             altSensor.Injector   = DeterministicInjector("NoiseSigma", 0.3);
             vsSensor.Injector    = DeterministicInjector("NoiseSigma", 0.1);
             asSensor.Injector    = DeterministicInjector("NoiseSigma", 0.1);
@@ -154,8 +144,8 @@ for run = 1:N
             rollSensor.Injector  = DeterministicInjector("NoiseSigma", 0.3);
             tempSensor.Injector  = DeterministicInjector("NoiseSigma", 0.5);
             oilSensor.Injector   = DeterministicInjector("NoiseSigma", 0.2);
-        
-            % Apply the fault only to the selected sensor
+
+            % Apply fault only to selected sensor
             switch targetSensor
                 case "ALT"
                     altSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
@@ -172,86 +162,20 @@ for run = 1:N
                 case "OIL"
                     oilSensor.Injector = DeterministicInjector(commonArgs{:}, specificArgs{:});
             end
-        
-            % Detection tracking for this run
+
             detectedThisRun = false;
             detectionTime = NaN;
 
         case "MCV-3"
-            altSensor.Injector = DeterministicInjector(...
-                "NoiseSigma", 0.3, ...
-                "FaultRatePerSecond", 0.1, ...
-                "W_Stuck", 1, ...
-                "W_Bias", 1, ...
-                "W_Drift", 1, ...
-                "W_Dropout", 1, ...
-                "W_Spike", 1 ...
-                ); 
-
-            vsSensor.Injector = DeterministicInjector(...
-                "NoiseSigma", 0.3, ...
-                "FaultRatePerSecond", 0.1, ...
-                "W_Stuck", 1, ...
-                "W_Bias", 1, ...
-                "W_Drift", 1, ...
-                "W_Dropout", 1, ...
-                "W_Spike", 1 ...
-                );
-
-            asSensor.Injector = DeterministicInjector(...
-                "NoiseSigma", 0.3, ...
-                "FaultRatePerSecond", 0.1, ...
-                "W_Stuck", 1, ...
-                "W_Bias", 1, ...
-                "W_Drift", 1, ...
-                "W_Dropout", 1, ...
-                "W_Spike", 1 ...
-                );
-
-            pitchSensor.Injector = DeterministicInjector(...
-                "NoiseSigma", 0.3, ...
-                "FaultRatePerSecond", 0.1, ...
-                "W_Stuck", 1, ...
-                "W_Bias", 1, ...
-                "W_Drift", 1, ...
-                "W_Dropout", 1, ...
-                "W_Spike", 1 ...
-                );
-
-            rollSensor.Injector = DeterministicInjector(...
-                "NoiseSigma", 0.3, ...
-                "FaultRatePerSecond", 0.1, ...
-                "W_Stuck", 1, ...
-                "W_Bias", 1, ...
-                "W_Drift", 1, ...
-                "W_Dropout", 1, ...
-                "W_Spike", 1 ...
-                );
-
-            tempSensor.Injector = DeterministicInjector(...
-                "NoiseSigma", 0.3, ...
-                "FaultRatePerSecond", 0.1, ...
-                "W_Stuck", 1, ...
-                "W_Bias", 1, ...
-                "W_Drift", 1, ...
-                "W_Dropout", 1, ...
-                "W_Spike", 1 ...
-                );
-
-            oilSensor.Injector = DeterminsticInjector(...
-                "NoiseSigma", 0.3, ...
-                "FaultRatePerSecond", 0.1, ...
-                "W_Stuck", 1, ...
-                "W_Bias", 1, ...
-                "W_Drift", 1, ...
-                "W_Dropout", 1, ...
-                "W_Spike", 1 ...
-                );
-    
-        otherwise
-            error("Unknown scenarioId: %s", scenarioId);
+            altSensor.Injector = DeterministicInjector("NoiseSigma",0.3,"FaultRatePerSecond",0.1,"W_Stuck",1,"W_Bias",1,"W_Drift",1,"W_Dropout",1,"W_Spike",1);
+            vsSensor.Injector = DeterministicInjector("NoiseSigma",0.3,"FaultRatePerSecond",0.1,"W_Stuck",1,"W_Bias",1,"W_Drift",1,"W_Dropout",1,"W_Spike",1);
+            asSensor.Injector = DeterministicInjector("NoiseSigma",0.3,"FaultRatePerSecond",0.1,"W_Stuck",1,"W_Bias",1,"W_Drift",1,"W_Dropout",1,"W_Spike",1);
+            pitchSensor.Injector = DeterministicInjector("NoiseSigma",0.3,"FaultRatePerSecond",0.1,"W_Stuck",1,"W_Bias",1,"W_Drift",1,"W_Dropout",1,"W_Spike",1);
+            rollSensor.Injector = DeterministicInjector("NoiseSigma",0.3,"FaultRatePerSecond",0.1,"W_Stuck",1,"W_Bias",1,"W_Drift",1,"W_Dropout",1,"W_Spike",1);
+            tempSensor.Injector = DeterministicInjector("NoiseSigma",0.3,"FaultRatePerSecond",0.1,"W_Stuck",1,"W_Bias",1,"W_Drift",1,"W_Dropout",1,"W_Spike",1);
+            oilSensor.Injector = DeterministicInjector("NoiseSigma",0.3,"FaultRatePerSecond",0.1,"W_Stuck",1,"W_Bias",1,"W_Drift",1,"W_Dropout",1,"W_Spike",1);
     end
-    
+
     %% Instantiate monitors
     altMon   = AltitudeMonitor("Fs", Fs);
     vsMon    = VerticalSpeedMonitor("Fs", Fs);
@@ -260,7 +184,7 @@ for run = 1:N
     rollMon  = RollMonitor("Fs", Fs);
     tempMon  = EngineTempMonitor("Fs", Fs);
     oilMon   = OilPressureMonitor("Fs", Fs);
-    
+
     %% Truth signals
     trueAlt   = @(tt) 1000 + 2*tt + 20*sin(0.5*tt);
     trueVS    = @(tt) 2 + 10*cos(0.5*tt);
@@ -269,25 +193,24 @@ for run = 1:N
     trueRoll  = @(tt) 10*sin(0.4*tt);
     trueTemp  = @(tt) 80 + 0.5*tt;
     trueOil   = @(tt) 400 + 10*sin(0.3*tt);
-    
+
     %% Orchestrator + logger
     orchestrator = SensorOrchestrator("Fs", Fs);
     logger = Logger();
     orchestrator.logger = logger;
-    
-    %% Evidence storage
+
+    %% Storage
     sensorStates = strings(length(t), 7);
     systemStates = strings(length(t), 1);
-    classifiedStates = zeros(length(t), 1);   % for BV-4 scenarios only
-    
-    %% Redundancy Mismatch storage
+
     altC_hist = nan(length(t),1);
     vsC_hist  = nan(length(t),1);
     sysStateNum = nan(length(t),1);
-    
+
+    %% Time loop
     for k = 1:length(t)
         tt = t(k);
-    
+
         altT = trueAlt(tt);
         vsT  = trueVS(tt);
         asT  = trueAS(tt);
@@ -295,15 +218,15 @@ for run = 1:N
         rolT = trueRoll(tt);
         tmpT = trueTemp(tt);
         oilT = trueOil(tt);
-    
-        [altMeas, altMeta] = altSensor.step(altT);
-        [vsMeas,  vsMeta ] = vsSensor.step(vsT);
-        [asMeas,  asMeta ] = asSensor.step(asT);
-        [pitMeas, pitMeta] = pitchSensor.step(pitT);
-        [rolMeas, rolMeta] = rollSensor.step(rolT);
-        [tmpMeas, tmpMeta] = tempSensor.step(tmpT);
-        [oilMeas, oilMeta] = oilSensor.step(oilT);
-    
+
+        [altMeas, ~] = altSensor.step(altT);
+        [vsMeas,  ~] = vsSensor.step(vsT);
+        [asMeas,  ~] = asSensor.step(asT);
+        [pitMeas, ~] = pitchSensor.step(pitT);
+        [rolMeas, ~] = rollSensor.step(rolT);
+        [tmpMeas, ~] = tempSensor.step(tmpT);
+        [oilMeas, ~] = oilSensor.step(oilT);
+
         [altC, altS] = altMon.step(altMeas);
         [vsC,  vsS ] = vsMon.step(vsMeas);
         [asC,  asS ] = asMon.step(asMeas);
@@ -311,7 +234,7 @@ for run = 1:N
         [rolC, rolS] = rollMon.step(rolMeas);
         [tmpC, tmpS] = tempMon.step(tmpMeas);
         [oilC, oilS] = oilMon.step(oilMeas);
-    
+
         altC_hist(k) = altC;
         vsC_hist(k)  = vsC;
 
@@ -333,13 +256,12 @@ for run = 1:N
                     targetState = oilS;
             end
 
-            % First detection = first entry into SUSPECT or FAILED after fault starts
             if ~detectedThisRun && tt >= faultStart && (targetState == "SUSPECT" || targetState == "FAILED")
                 detectedThisRun = true;
                 detectionTime = tt;
             end
         end
-    
+
         states = struct( ...
             "AltitudeSensor", altS, ...
             "AirspeedSensor", asS, ...
@@ -348,13 +270,13 @@ for run = 1:N
             "RollSensor", rolS, ...
             "TemperatureSensor", tmpS, ...
             "PressureSensor", oilS);
-    
+
         values = struct( ...
             "Altitude", altC, ...
             "VerticalSpeed", vsC);
-    
-        [state, logMsg, diagnostics] = orchestrator.step(states, values, tt);
-    
+
+        [state, ~, ~] = orchestrator.step(states, values, tt);
+
         switch state
             case "NORMAL"
                 sysStateNum(k) = 0;
@@ -363,109 +285,189 @@ for run = 1:N
             case "FAULT"
                 sysStateNum(k) = 2;
         end
-    
+
         sensorStates(k,:) = [altS, asS, vsS, pitS, rolS, tmpS, oilS];
         systemStates(k) = state;
-    
-        fprintf("t=%.2f  SYS=%s  ALT=%s  VS=%s  AS=%s  PIT=%s  ROL=%s  TMP=%s  OIL=%s\n", ...
-            tt, state, altS, vsS, asS, pitS, rolS, tmpS, oilS);
+
+        if N == 1
+            fprintf("t=%.2f  SYS=%s  ALT=%s  VS=%s  AS=%s  PIT=%s  ROL=%s  TMP=%s  OIL=%s\n", ...
+                tt, state, altS, vsS, asS, pitS, rolS, tmpS, oilS);
+        end
 
         if state == "WARN"
-            warnPresent(k) = 1; 
+            warnPresent(k) = 1;
+        end
+
+        if state == "FAULT"
+            faultPresent(k) = 1;
         end
     end
 
+    %% Count state entries
     for i = 2:length(sysStateNum)
-
-        % Detect entry into WARN
         if sysStateNum(i) == 1 && sysStateNum(i-1) ~= 1
             warnEvents = warnEvents + 1;
+            thisRunWarnEntries = thisRunWarnEntries + 1;
         end
-    
-        % Detect entry into FAULT
+
         if sysStateNum(i) == 2 && sysStateNum(i-1) ~= 2
             faultEvents = faultEvents + 1;
+            thisRunFaultEntries = thisRunFaultEntries + 1;
         end
     end
 
-    %% Store overall state for plotting after simulation 
+    %% Store per-run outputs
     if any(sysStateNum == 1)
-        warnOccured(run) = 1; 
+        warnOccured(run) = 1;
     end
 
     if any(sysStateNum == 2)
-        faultOccured(run) = 1;  
-    end 
-
-    warnTimesteps(run, :) = warnPresent; 
-
-    %% Calculate the rate of change of the altitude
-    altSlope_hist = nan(length(t),1);
-    
-    for k = 2:length(t)
-        if ~isnan(altC_hist(k)) && ~isnan(altC_hist(k-1))
-            altSlope_hist(k) = (altC_hist(k) - altC_hist(k-1)) / dt;
-        end
+        faultOccured(run) = 1;
     end
 
-    if scenarioId == "MCV-2"
-        if detectedThisRun
-            detectedRuns(run) = 1;
-            detectionDelayRuns(run) = detectionTime - faultStart;
-        end
+    warnTimesteps(run, :) = warnPresent;
+
+    warnEntriesPerRun(run) = thisRunWarnEntries;
+    faultEntriesPerRun(run) = thisRunFaultEntries;
+    warnTimestepsPerRun(run) = sum(warnPresent);
+    faultTimestepsPerRun(run) = sum(faultPresent);
+
+    if scenarioId == "MCV-2" && detectedThisRun
+        detectedRuns(run) = 1;
+        detectionDelayRuns(run) = max(0, detectionTime - faultStart);
     end
 end
 
+%% Summary results
 totalTimesteps = N * length(t);
 
 warnEventRate = warnEvents / totalTimesteps;
 faultEventRate = faultEvents / totalTimesteps;
 
-warnRateRuns = (sum(warnOccured == 1))/N;
-warnRateTimestepsRows = sum(warnTimesteps == 1); 
-warnRateTimesteps = (sum(warnRateTimestepsRows))/(numel(warnTimesteps)); 
-faultRate = (sum(faultOccured == 1))/N; 
+warnRateRuns = sum(warnOccured == 1) / N;
+warnRateTimestepsRows = sum(warnTimesteps == 1);
+warnRateTimesteps = sum(warnRateTimestepsRows) / numel(warnTimesteps);
+faultRate = sum(faultOccured == 1) / N;
 
 fprintf("Monte Carlo Results for %d runs in scenario %s:\n", N, scenarioId)
-
 fprintf("False WARN events: %d\n", warnEvents)
 fprintf("WARN event rate: %.5f\n", warnEventRate)
-
 fprintf("FAULT events: %d\n", faultEvents)
-fprintf("FAULT event rate (runs): %.3f\n", faultEventRate)
+fprintf("FAULT event rate: %.5f\n", faultEventRate)
 
 if scenarioId == "MCV-1"
-    % Make Graph(s) showing noise distribution and need to show % which caused warnings/fails etc.  
-    
-    % Hiustogram of warning outcomes
+    pWarnTimestepsOK  = mean(warnTimestepsPerRun  <= req.MCV1.maxWarnTimestepsPerRun)  * 100;
+    pWarnTimestepsBad = mean(warnTimestepsPerRun  >  req.MCV1.maxWarnTimestepsPerRun)  * 100;
 
-    % Bar chart of warning/fault rates
+    pFaultTimestepsOK  = mean(faultTimestepsPerRun <= req.MCV1.maxFaultTimestepsPerRun) * 100;
+    pFaultTimestepsBad = mean(faultTimestepsPerRun >  req.MCV1.maxFaultTimestepsPerRun) * 100;
+
+    pWarnEntriesOK  = mean(warnEntriesPerRun <= req.MCV1.maxWarnEntriesPerRun) * 100;
+    pWarnEntriesBad = mean(warnEntriesPerRun >  req.MCV1.maxWarnEntriesPerRun) * 100;
+
+    pFaultEntriesOK  = mean(faultEntriesPerRun <= req.MCV1.maxFaultEntriesPerRun) * 100;
+    pFaultEntriesBad = mean(faultEntriesPerRun >  req.MCV1.maxFaultEntriesPerRun) * 100;
+
+    fprintf("\nMCV-1 Requirement Check:\n");
+    fprintf("WARN timesteps/run <= %g: %.2f %% of runs, > threshold: %.2f %%\n", ...
+        req.MCV1.maxWarnTimestepsPerRun, pWarnTimestepsOK, pWarnTimestepsBad);
+    fprintf("FAULT timesteps/run <= %g: %.2f %% of runs, > threshold: %.2f %%\n", ...
+        req.MCV1.maxFaultTimestepsPerRun, pFaultTimestepsOK, pFaultTimestepsBad);
+    fprintf("WARN entries/run <= %g: %.2f %% of runs, > threshold: %.2f %%\n", ...
+        req.MCV1.maxWarnEntriesPerRun, pWarnEntriesOK, pWarnEntriesBad);
+    fprintf("FAULT entries/run <= %g: %.2f %% of runs, > threshold: %.2f %%\n", ...
+        req.MCV1.maxFaultEntriesPerRun, pFaultEntriesOK, pFaultEntriesBad);
+
     figure
     bar([warnEventRate*100 faultEventRate*100])
     ylabel("Percentage (%)")
     xticklabels(["False WARN","False FAULT"])
-    title("Monte Carlo Robustness Results under 1000 runs, treating WARN and FAULT transitions as event-driven")
-    annotation("textbox", ...
-    [0.65 0.6 0.25 0.25], ...
-    "String", { ...
-    "Noise model:", ...
-    "Altitude σ = 0.3 m", ...
-    "Vertical Speed σ = 0.1 m/s", ...
-    "Airspeed σ = 0.1 m/s", ...
-    "Pitch σ = 0.3°", ...
-    "Roll σ = 0.3°", ...
-    "Temp σ = 0.5 °C", ...
-    "Oil σ = 0.2 bar"}, ...
-    "FitBoxToText","on");
+    title("Monte Carlo Robustness Results")
     grid on
 
-end 
+    plotDistributionWithRequirement(warnTimestepsPerRun, req.MCV1.maxWarnTimestepsPerRun, ...
+        "MCV-1 Distribution: False WARN Timesteps per Run", "False WARN timesteps per run");
+
+    plotDistributionWithRequirement(faultTimestepsPerRun, req.MCV1.maxFaultTimestepsPerRun, ...
+        "MCV-1 Distribution: False FAULT Timesteps per Run", "False FAULT timesteps per run");
+
+    plotDistributionWithRequirement(warnEntriesPerRun, req.MCV1.maxWarnEntriesPerRun, ...
+        "MCV-1 Distribution: False WARN Entries per Run", "False WARN entries per run");
+
+    plotDistributionWithRequirement(faultEntriesPerRun, req.MCV1.maxFaultEntriesPerRun, ...
+        "MCV-1 Distribution: False FAULT Entries per Run", "False FAULT entries per run");
+end
 
 if scenarioId == "MCV-2"
     detectionProbability = mean(detectedRuns) * 100;
     missedDetectionProbability = (1 - mean(detectedRuns)) * 100;
 
     validDelays = detectionDelayRuns(~isnan(detectionDelayRuns));
+
+    if ~isempty(validDelays)
+        fprintf("Min detection delay: %.4f s\n", min(validDelays));
+        fprintf("Max detection delay: %.4f s\n", max(validDelays));
+        fprintf("Mean detection delay: %.4f s\n", mean(validDelays));
+
+        edges = -dt/2 : dt : (max(validDelays) + dt/2);
+
+        binWidth = 0.001;
+
+        figure
+        histogram(validDelays, 'BinWidth', binWidth)
+        hold on
+        xline(req.MCV2.maxDetectionDelay, 'r--', 'LineWidth', 2)
+        
+        xlim([0 max(validDelays)+binWidth])
+        xlabel("Detection delay (s)")
+        ylabel("Count")
+        title("MCV-2 Detection Delay Distribution")
+        grid on
+        
+        pWithin = mean(validDelays <= req.MCV2.maxDetectionDelay) * 100;
+        pBeyond = mean(validDelays > req.MCV2.maxDetectionDelay) * 100;
+        
+        txt = sprintf([
+            "Requirement threshold = %.2f s\n"
+            "Proportion <= threshold: %.2f %%\n"
+            "Proportion > threshold: %.2f %%"], req.MCV2.maxDetectionDelay, pWithin, pBeyond);
+        
+        annotation("textbox", ...
+            [0.58 0.68 0.25 0.12], ...
+            "String", txt, ...
+            "FitBoxToText", "on", ...
+            "BackgroundColor", "white");
+        
+        hold off
+
+        % Manual empirical CDF (no toolbox required)
+        x = sort(validDelays);
+        f = (1:length(x)) / length(x);
+
+        figure
+        plot(x, f, 'LineWidth', 2)
+        hold on
+        xline(req.MCV2.maxDetectionDelay, 'r--', 'LineWidth', 2)
+
+        pWithin = mean(validDelays <= req.MCV2.maxDetectionDelay) * 100;
+
+        xlabel("Detection delay (s)")
+        ylabel("Cumulative probability")
+        title("MCV-2 Detection Delay CDF")
+        grid on
+
+        txt = sprintf("P(delay <= %.2f s) = %.2f %%", ...
+            req.MCV2.maxDetectionDelay, pWithin);
+
+        annotation("textbox", ...
+            [0.58 0.2 0.25 0.1], ...
+            "String", txt, ...
+            "FitBoxToText", "on", ...
+            "BackgroundColor", "white");
+
+        hold off
+    end
+
     meanDetectionDelay = mean(validDelays);
     maxDetectionDelay = max(validDelays);
 
@@ -475,9 +477,7 @@ if scenarioId == "MCV-2"
     fprintf("Mean detection delay: %.3f s\n", meanDetectionDelay);
     fprintf("Max detection delay: %.3f s\n", maxDetectionDelay);
 
-    % Per-fault-type results
     failureClasses = ["BIAS", "DRIFT", "STUCK", "DROPOUT"];
-
     fprintf("\nMCV-2 Detection Results by Fault Type:\n");
 
     for j = 1:length(failureClasses)
@@ -517,17 +517,7 @@ disp("Scenario complete.");
 
 %% Local helper function
 function classId = FaultClassifier(meta)
-% Converts injector metadata into a numeric fault-class label.
-%
-% Output mapping:
-%   0 = Normal
-%   1 = Stuck-at
-%   2 = Bias
-%   3 = Drift
-%   4 = Spike
-%   5 = Dropout
-
-    classId = 0;  % default = Normal
+    classId = 0;
 
     if ~isstruct(meta)
         return;
@@ -556,4 +546,38 @@ function classId = FaultClassifier(meta)
         otherwise
             classId = 0;
     end
+end
+
+function plotDistributionWithRequirement(dataVec, threshold, plotTitleStr, xLabelStr)
+    dataVec = dataVec(~isnan(dataVec));
+
+    if isempty(dataVec)
+        warning("No valid data for plot: %s", plotTitleStr);
+        return;
+    end
+
+    pBelowEq = mean(dataVec <= threshold) * 100;
+    pAbove   = mean(dataVec > threshold) * 100;
+
+    figure
+    histogram(dataVec)
+    hold on
+    xline(threshold, 'r--', 'LineWidth', 2);
+
+    xlabel(xLabelStr)
+    ylabel("Count")
+    title(plotTitleStr)
+    grid on
+
+    txt = sprintf(["Requirement threshold = %.3f\n"
+        "Proportion <= threshold: %.2f %%\n"
+        "Proportion > threshold: %.2f %%"], threshold, pBelowEq, pAbove);
+
+    annotation("textbox", ...
+        [0.62 0.68 0.25 0.18], ...
+        "String", txt, ...
+        "FitBoxToText", "on", ...
+        "BackgroundColor", "white");
+
+    hold off
 end
